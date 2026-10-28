@@ -39,7 +39,7 @@ export default function Detection() {
     async function checkHealth() {
       const res = await testBackendConnection();
       if (isMounted) {
-        setBackendStatus({ checked: true, connected: res.connected, message: res.message });
+        setBackendStatus({ checked: true, connected: res.connected, message: res.message, url: res.url });
       }
     }
     checkHealth();

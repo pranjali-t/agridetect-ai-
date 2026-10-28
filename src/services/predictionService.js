@@ -11,24 +11,29 @@
 
 import { SUPPORTED_CROPS } from '../data/cropsData';
 
+// Verified production Render backend URL (used as fallback when VITE_API_URL is omitted or in production)
+const DEFAULT_PRODUCTION_BACKEND = 'https://agridetect-ai-ocz5.onrender.com';
+
 // Configurable Vite environment variable with smart fallback
 function resolveApiBaseUrl() {
   const envUrl = import.meta.env.VITE_API_URL;
   if (typeof envUrl === 'string' && envUrl.trim() !== '') {
     return envUrl.trim().replace(/\/$/, '');
   }
+
+  // Detect local development environment
   if (typeof window !== 'undefined' && window.location) {
-    const port = window.location.port;
-    if (port === '5173' || port === '3000') {
+    const hostname = window.location.hostname;
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
       return 'http://localhost:8000';
     }
-    // Unified host or hosted cloud: use same origin (relative path)
-    return '';
   }
-  return 'http://localhost:8000';
+
+  // Deployed production environment (Vercel, custom domain, etc.)
+  return DEFAULT_PRODUCTION_BACKEND;
 }
 
-const API_BASE_URL = resolveApiBaseUrl();
+export const API_BASE_URL = resolveApiBaseUrl();
 
 /**
  * Predicts disease from an uploaded leaf image using the live FastAPI backend.
@@ -61,7 +66,7 @@ async function callFastAPIBackend(imageFile) {
   const formData = new FormData();
   formData.append('file', imageFile);
 
-  const endpoint = API_BASE_URL ? `${API_BASE_URL}/predict` : '/predict';
+  const endpoint = `${API_BASE_URL}/predict`;
 
   let response;
   try {
@@ -71,25 +76,39 @@ async function callFastAPIBackend(imageFile) {
     });
   } catch (networkError) {
     throw new Error(
-      `Network connection failed. Could not reach backend server at ${endpoint || window.location.origin}. Please check that the FastAPI service is running.`
+      `Network connection failed. Could not reach backend server at ${API_BASE_URL}. The Render service may be waking up from sleep mode (cold start), please wait ~30 seconds and try again.`
+    );
+  }
+
+  // Read response body safely ONCE as text to prevent "body stream already read"
+  const rawText = await response.text();
+
+  let data;
+  try {
+    data = JSON.parse(rawText);
+  } catch (_) {
+    // Check if response is HTML (e.g. from a cloud proxy 502/503 or Vercel rewrite)
+    if (rawText.trim().startsWith('<')) {
+      throw new Error(
+        `Backend returned an HTML response instead of JSON (HTTP ${response.status}). The Render service may be starting up or the endpoint URL (${endpoint}) is unreachable.`
+      );
+    }
+    throw new Error(
+      `Backend returned an invalid non-JSON response (HTTP ${response.status}): ${rawText.slice(0, 150)}`
     );
   }
 
   if (!response.ok) {
-    let errorDetail = `Backend returned status ${response.status}`;
-    try {
-      const errJson = await response.json();
-      if (errJson && errJson.detail) {
-        errorDetail = errJson.detail;
-      }
-    } catch (_) {
-      const errText = await response.text();
-      if (errText) errorDetail = errText;
-    }
+    const errorDetail = (data && (data.detail || data.message))
+      ? (typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail))
+      : `Inference failed with HTTP ${response.status}`;
     throw new Error(errorDetail);
   }
 
-  const data = await response.json();
+  // Validate expected payload structure from FastAPI
+  if (!data || typeof data.crop === 'undefined' || typeof data.confidence === 'undefined') {
+    throw new Error('Backend returned unexpected data structure missing crop or confidence fields.');
+  }
 
   // Normalize top classes for result card consumption
   const topClasses = (data.top_classes || []).map((tc) => ({
@@ -112,7 +131,7 @@ async function callFastAPIBackend(imageFile) {
     advisory: data.advisory || 'Consult your regional agricultural extension service for localized cultural guidelines.',
     timestamp: new Date().toISOString(),
     isMock: false,
-    dataSource: 'Live MobileNetV2 Keras Model (FastAPI Backend)',
+    dataSource: 'Live MobileNetV2 Keras Model (Render FastAPI Backend)',
     modelLatencyMs: data.latency_ms || null,
     fileName: imageFile.name,
     fileSizeFormatted: formatFileSize(imageFile.size),
@@ -167,27 +186,49 @@ export function validateLeafImage(file) {
  * Tests connection to the FastAPI health endpoint.
  */
 export async function testBackendConnection() {
-  const endpoint = API_BASE_URL ? `${API_BASE_URL}/health` : '/health';
+  const endpoint = `${API_BASE_URL}/health`;
 
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 4000);
+    // Allow up to 15s to accommodate Render free-tier cold starts
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
     const res = await fetch(endpoint, { signal: controller.signal });
     clearTimeout(timeoutId);
 
-    if (res.ok) {
-      const data = await res.json();
-      const originDisplay = API_BASE_URL || (typeof window !== 'undefined' ? window.location.origin : 'FastAPI Backend');
+    // Read body text once safely
+    const rawText = await res.text();
+
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (_) {
+      return {
+        connected: false,
+        message: `Backend returned HTML/non-JSON at ${endpoint} (HTTP ${res.status}). Service might be booting or sleeping.`,
+        url: API_BASE_URL,
+      };
+    }
+
+    if (res.ok && data && (data.status === 'healthy' || data.model_loaded)) {
       return { 
         connected: true, 
         message: `Connected to FastAPI server (${data.class_count || 25} classes active)`,
-        url: originDisplay,
+        url: API_BASE_URL,
         data: data 
       };
     }
-    return { connected: false, message: `Backend responded with HTTP status ${res.status}.` };
+
+    return { 
+      connected: false, 
+      message: `Backend returned status ${res.status}: ${data.detail || data.status || 'Degraded'}`,
+      url: API_BASE_URL,
+    };
   } catch (err) {
-    return { connected: false, message: `Could not reach backend at ${endpoint}: ${err.message}` };
+    const isTimeout = err.name === 'AbortError';
+    const msg = isTimeout
+      ? `Connection timed out after 15s. The Render service is likely waking up from sleep mode (cold start). Please wait ~30 seconds and refresh.`
+      : `Could not reach backend at ${endpoint}: ${err.message}`;
+    return { connected: false, message: msg, url: API_BASE_URL };
   }
 }
 

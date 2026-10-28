@@ -1,0 +1,11 @@
+node_modules
+backend/venv
+.git
+tools
+*.log
+.DS_Store
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache

@@ -1,5 +1,16 @@
+# Environment variables and secrets
+.env
+.env.local
+.env.*.local
+*.env
+
+# Build outputs
+dist/
+dist-ssr/
+build/
+
 # Logs
-logs
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -8,8 +19,7 @@ pnpm-debug.log*
 lerna-debug.log*
 
 # Node dependencies
-node_modules
-dist-ssr
+node_modules/
 *.local
 
 # Python environment and cache
